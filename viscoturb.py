@@ -19,6 +19,8 @@ import dedalus.public as de
 from dedalus.tools  import post
 from dedalus.extras import flow_tools
 
+from filter_field import filter_field
+
 from configparser import ConfigParser
 from docopt import docopt
 
@@ -45,10 +47,14 @@ Re = params.getfloat('Re')
 Wi = params.getfloat('Wi')
 eta = params.getfloat('eta')
 
+logger.info("Re = {:e}".format(Re))
+logger.info("Wi = {:e}".format(Wi))
+logger.info("eta = {:e}".format( eta))
+
 # always on square domain
 L = nL * 2 * np.pi
-x = de.Fourier('x',nx, interval=[0, L])
-y = de.Fourier('y',ny, interval=[0, L])
+x = de.Fourier('x',nx, interval=[0, L])#, dealias=3/2)
+y = de.Fourier('y',ny, interval=[0, L])#, dealias=3/2)
 
 domain = de.Domain([x,y], grid_dtype='float', mesh=mesh)
 
@@ -70,9 +76,7 @@ problem.substitutions['Div_σ_y'] = "dx(σ12) + dy(σ22)"
 
 # Navier-Stokes
 problem.add_equation("dt(u) - Lap(u)/(Re*(1+η)) + dx(p) = 2*η*Div_σ_x/(Wi*Re*(1+η)) - u*dx(u) - v*dy(u) + cos(y)/Re")
-problem.add_equation("dt(v) - Lap(u)/(Re*(1+η)) + dy(p) = 2*η*Div_σ_y/(Wi*Re*(1+η)) - u*dx(v) - v*dy(v)")
-#problem.add_equation("dt(u) - Lap(u)/(Re*(1+η)) + dx(p) = -u*dx(u) - v*dy(u) - cos(y)/Re")
-#problem.add_equation("dt(v) - Lap(u)/(Re*(1+η)) + dy(p) = -u*dx(v) - v*dy(v)")
+problem.add_equation("dt(v) - Lap(v)/(Re*(1+η)) + dy(p) = 2*η*Div_σ_y/(Wi*Re*(1+η)) - u*dx(v) - v*dy(v)")
 
 #incompressibility
 problem.add_equation("dx(u) + dy(v) = 0", condition="(nx != 0) or (ny != 0)")
@@ -108,7 +112,7 @@ else:
 
 
 basedir = pathlib.Path('scratch')
-outdir = config_file.stem
+outdir = "viscoturb_" + config_file.stem
 data_dir = basedir/outdir
 if domain.dist.comm.rank == 0:
     if not data_dir.exists():
@@ -124,6 +128,8 @@ snap = solver.evaluator.add_file_handler(data_dir/'snapshots', sim_dt=1e-1, max_
 snap.add_task("dx(v) - dy(u)", name='vorticity')
 snap.add_task("u")
 snap.add_task("v")
+snap.add_task("u",name="uc", layout="c")
+snap.add_task("v",name="vc", layout="c")
 snap.add_task("σ11")
 snap.add_task("σ12")
 snap.add_task("σ22")
@@ -135,14 +141,34 @@ analysis_tasks.append(snap)
 timeseries = solver.evaluator.add_file_handler(data_dir/'timeseries', iter=100)
 timeseries.add_task("0.5*integ(u**2 + v**2)/L**2", name='Ekin')
 timeseries.add_task("integ(σ11 + σ22)/L**2", name='Σ')
-
+analysis_tasks.append(timeseries)
 # initial conditions
-xx, yy = domain.grids()
+xx, yy = domain.grids(scales=domain.dealias)
+
+phi = domain.new_field()
+
+seed = None
+shape = domain.local_grid_shape(scales=domain.dealias)
+rand = np.random.RandomState(seed)
+
+filter_frac = 0.1
+ampl  = 1e-5
+
 u = solver.state['u']
+v = solver.state['v']
+
 lU11 = solver.state['lU11']
 U12 = solver.state['U12']
 lU22 = solver.state['lU22']
-u['g'] = np.cos(yy)
+
+for f in [u, v, phi, lU11, U12, lU22]:
+    f.set_scales(domain.dealias, keep_data=False)
+
+phi['g'] = ampl * rand.standard_normal(shape)
+filter_field(phi,frac=filter_frac)
+
+u['g'] = np.cos(yy) + phi.differentiate('y')['g']
+v['g'] = -phi.differentiate('x')['g']
 
 lU11['g'] = np.log(np.sqrt(1 + Wi**2/2 * np.sin(yy)**2))
 U12['g'] = -Wi/2 * np.sin(yy)/np.exp(lU11['g'])
