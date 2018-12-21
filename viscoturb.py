@@ -59,6 +59,7 @@ y = de.Fourier('y',ny, interval=[0, L])#, dealias=3/2)
 domain = de.Domain([x,y], grid_dtype='float', mesh=mesh)
 
 variables = ['u', 'v', 'p',  'lU11', 'U12', 'lU22']
+#variables = ['u', 'v', 'p',  'lU11', 'U12', 'lU22', 'σ11', 'σ12', 'σ22']
 
 problem = de.IVP(domain, variables=variables)
 problem.parameters['L'] = L
@@ -69,7 +70,7 @@ problem.substitutions['U11'] = 'exp(lU11)'
 problem.substitutions['U22'] = 'exp(lU22)'
 problem.substitutions['σ11'] = 'U11*U11'
 problem.substitutions['σ12'] = 'U11*U12'
-problem.substitutions['σ22'] = 'U22*U22'
+problem.substitutions['σ22'] = 'U12*U12 + U22*U22'
 problem.substitutions['Lap(A)'] = "dx(dx(A)) + dy(dy(A))"
 problem.substitutions['Div_σ_x'] = "dx(σ11) + dy(σ12)"
 problem.substitutions['Div_σ_y'] = "dx(σ12) + dy(σ22)"
@@ -84,9 +85,14 @@ problem.add_equation("p = 0", condition="(nx == 0) and (ny == 0)")
 
 # conformation tensor evolution
 # use Cholsky Decomposition
-problem.add_equation("dt(lU11) - dx(u) = -u*dx(lU11) - v*dy(lU11) + U12*dy(u)*exp(-lU11) - (1 - exp(-2*lU11))/Wi")
-problem.add_equation("dt( U12) - dy(v) = -u*dx( U12) - v*dy( U12) + exp(-lU11)*(exp(2*lU22) - U12**2)*dy(u) + exp(-lU11)*dx(v) + U12*dy(v) - U12*(1 + exp(-2*lU11))/Wi")
-problem.add_equation("dt(lU22) - dy(v) = -u*dx(lU22) - v*dy(lU22) + exp(lU11 - 2*lU22)*U12*dx(v) - (1 - exp(-2*lU22))/Wi")
+problem.add_equation("dt(lU11) - dx(u) = -u*dx(lU11) - v*dy(lU11) + U12*dy(u)/U11 - (1 - 1/U11**2)/Wi")
+problem.add_equation("dt( U12)         = -u*dx( U12) - v*dy( U12) + U22**2/U11*dy(u) + U11*dx(v) + U12*dy(v) - U12*(1 + 1/U11**2)/Wi")
+problem.add_equation("dt(lU22) - dy(v) = -u*dx(lU22) - v*dy(lU22) - U12*dy(u)/U11 + (U12**2/(U11**2 * U22**2) - 1 + 1/U22**2)/Wi")
+
+# sigmas
+# problem.add_equation("σ11 = U11*U11")
+# problem.add_equation("σ12 = U11*U12")
+# problem.add_equation("σ22 = U12*U12 + U22*U22")
 
 # Build solver
 solver = problem.build_solver(de.timesteppers.MCNAB2)
@@ -152,7 +158,7 @@ shape = domain.local_grid_shape(scales=domain.dealias)
 rand = np.random.RandomState(seed)
 
 filter_frac = 0.1
-ampl  = 1e-5
+ampl  = 1e-3
 
 u = solver.state['u']
 v = solver.state['v']
@@ -172,11 +178,11 @@ v['g'] = -phi.differentiate('x')['g']
 
 lU11['g'] = np.log(np.sqrt(1 + Wi**2/2 * np.sin(yy)**2))
 U12['g'] = -Wi/2 * np.sin(yy)/np.exp(lU11['g'])
-lU22['g'] = 0. # log(1)
+lU22['g'] = np.log(np.sqrt(1 - (Wi/2 * np.sin(yy))**2/(1 + Wi**2/2 * np.sin(yy)**2)))
 
 flow = flow_tools.GlobalFlowProperty(solver, cadence=10)
-flow.add_property("0.5*integ(u**2 + v**2)", name="ekin")
-flow.add_property("integ(σ11 + σ22)", name="sigma")
+flow.add_property("0.5*integ(u**2 + v**2)/L**2", name="ekin")
+flow.add_property("integ(σ11 + σ22)/L**2", name="sigma")
 
 start  = time.time()
 while solver.ok:
