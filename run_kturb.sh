@@ -10,5 +10,5 @@
 source /home/joishi/build/dedalus_intel_mpi/bin/activate
 
 date
-mpirun -np 8 python3 kturb.py run_H.cfg
+mpirun -np 8 python3 kturb_platt_norm.py run_J.cfg
 date
