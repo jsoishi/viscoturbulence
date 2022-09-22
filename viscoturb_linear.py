@@ -14,6 +14,12 @@ import logging
 import pathlib
 import numpy as np
 
+import matplotlib
+matplotlib.use('Agg')
+from mpi4py import MPI
+
+from eigentools import Eigenproblem, CriticalFinder
+
 import dedalus.public as de
 from dedalus.tools  import post
 from dedalus.extras import flow_tools
@@ -22,6 +28,8 @@ from filter_field import filter_field
 
 from configparser import ConfigParser
 from docopt import docopt
+
+comm = MPI.COMM_WORLD
 
 logger = logging.getLogger(__name__)
 
@@ -46,13 +54,12 @@ logger.info("eta = {:e}".format( eta))
 logger.info("nL = {:}".format(nL))
 logger.info("kx = {:}".format(kx))
 
-
 # always on square domain
 #L = nL * 2 * np.pi
 L = 2 * np.pi
 y = de.Chebyshev('y',ny, interval=[0, L])#, dealias=3/2)
 
-domain = de.Domain([y], grid_dtype='float')
+domain = de.Domain([y], grid_dtype='float', comm=MPI.COMM_SELF)
 
 variables = ['u', 'v', 'p',  'σ11', 'σ12', 'σ22', 'u_y', 'v_y']
 
@@ -96,19 +103,50 @@ problem.add_equation("dy(v) - v_y = 0")
 # Boundary Conditions
 problem.add_bc("left(u) = right(u)")
 problem.add_bc("left(v) = right(v)")
+problem.add_bc("left(u_y) = right(u_y)")
+problem.add_bc("left(v_y) = right(v_y)")
 problem.add_bc("left(σ11) = right(σ11)")
 problem.add_bc("left(σ12) = right(σ12)")
 problem.add_bc("left(σ22) = right(σ22)")
 
-# Build solver
-solver = problem.build_solver()
-logger.info('Solver built')
+# create an Eigenproblem object
+EP = Eigenproblem(problem, sparse=True)
 
-basedir = pathlib.Path('scratch')
-outdir = "viscoturb_linear_" + config_file.stem
-data_dir = basedir/outdir
-if domain.dist.comm.rank == 0:
-    if not data_dir.exists():
-        data_dir.mkdir()
+# create a shim function to translate (x, y) to the parameters for the eigenvalue problem:
 
-logger.info("Total Run time: {:5.2f} sec".format(stop-start))
+def shim(x,y):
+    gr, indx, freq = EP.growth_rate({"Re":x,"Wi":y})
+    ret = gr+1j*freq
+    if type(ret) == np.ndarray:
+        return ret[0]
+    else:
+        return ret
+
+cf = CriticalFinder(shim, comm)
+
+# generating the grid is the longest part
+start = time.time()
+mins = np.array((0.1, 1))
+maxs = np.array((5, 20))
+nums = np.array((2  , 2))
+try:
+    cf.load_grid('viscoturb_growth_rates.h5')
+except:
+    cf.grid_generator(mins, maxs, nums)
+    if comm.rank == 0:
+        cf.save_grid('viscoturb_growth_rates')
+end = time.time()
+if comm.rank == 0:
+    print("grid generation time: {:10.5f} sec".format(end-start))
+
+cf.root_finder()
+crit = cf.crit_finder(find_freq = True)
+
+if comm.rank == 0:
+    print("crit = {}".format(crit))
+    print("critical Wi = {:10.5f}".format(crit[1]))
+    print("critical Re = {:10.5f}".format(crit[0]))
+    print("critical omega = {:10.5f}".format(crit[2]))
+
+    cf.save_grid('orr_sommerfeld_growth_rates')
+    cf.plot_crit()
